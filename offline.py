@@ -1,4 +1,4 @@
-"""Word matching with no language model and no API key: keyword search and offline answers.
+"""Word matching with no language model: scripted small talk, keyword search and offline answers.
 
 Quotes the lines of the retrieved chunks that share the most words with the question, each with its
 [Source: ...] title. Table rows are quoted under their header row so the columns stay readable.
@@ -9,6 +9,7 @@ search always returns its nearest chunks, even for "What is the capital of Franc
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from functools import cache
 
 from ingest import Chunk, load_chunks
@@ -25,6 +26,52 @@ NOT_FOUND = ("I couldn't find that in my Minecraft knowledge base. I'm running o
              "the library: try asking about crafting, mobs, biomes, redstone, enchanting or commands.")
 GREETING = ("Hi! I'm CraftGuide, running offline, so I can't chat, but I can look things up in my Minecraft "
             "library. Try \"how do I craft a bed?\" or \"how much health does an Enderman have?\"")
+
+
+GREET = r"(?:(?:hi|hello|hey|hiya|yo|good (?:morning|afternoon|evening))(?: there)?(?: craftguide)?(?: again)? ?)"
+INTRO = r"(?:my name is|my names|call me) (?P<name>[a-z][\w-]*)"
+
+
+def normalize(text: str) -> str:
+    """'Hi, what's my name?' -> 'Hi whats my name': no apostrophes or punctuation, single spaces."""
+    return " ".join(re.sub(r"[^\w\s]", " ", re.sub(r"['’]", "", text)).split())
+
+
+def remembered_name(history: list[dict[str, str]]) -> str:
+    for message in reversed(history):
+        if message["role"] == "user" and (m := re.search(rf"\b{INTRO}", normalize(message["content"]), re.I)):
+            return f"Your name is {m['name']}!"
+    return "I don't know your name yet. Tell me with \"my name is ...\"."
+
+
+Reply = Callable[[re.Match, list[dict[str, str]]], str]
+
+# First match wins; each pattern must match the whole message, so "hi, how do I craft a bed?" is a question.
+SMALL_TALK: list[tuple[re.Pattern, Reply]] = [(re.compile(pattern, re.I), reply) for pattern, reply in [
+    (rf"{GREET}?(?:how are (?:you|u)|hows it going|how is it going|how you doing)(?: doing)?(?: today)?",
+     lambda m, h: "I'm doing great, thanks for asking! Got a Minecraft question for me?"),
+    (rf"{GREET}?{INTRO}",
+     lambda m, h: f"Nice to meet you, {m['name']}! Ask me anything about Minecraft."),
+    (rf"{GREET}?(?:whats|what is) my name|do you (?:know|remember) my name|who am i",
+     lambda m, h: remembered_name(h)),
+    (rf"{GREET}?(?:who|what) are (?:you|u)|(?:whats|what is) your name",
+     lambda m, h: "I'm CraftGuide, a Minecraft helper. I'm running offline right now, so I can't chat much, "
+                  "but I can look up recipes, mobs, biomes, redstone, enchanting and commands in my library."),
+    (r"(?:ok |okay )?(?:thanks|thank you|thx|ty|cheers)(?: (?:a lot|so much|very much))?(?: craftguide)?",
+     lambda m, h: "You're welcome! Happy crafting."),
+    (r"(?:ok |okay )?(?:bye|goodbye|bye bye|see (?:you|ya)(?: later)?|cya|good night|gotta go)(?: craftguide)?",
+     lambda m, h: "Bye! Good luck with your world."),
+    (GREET,
+     lambda m, h: "Hi! I'm CraftGuide. Ask me about crafting, mobs, biomes, redstone, enchanting or commands."),
+]]
+
+
+def small_talk(question: str, history: list[dict[str, str]]) -> str | None:
+    text = normalize(question)
+    for pattern, reply in SMALL_TALK:
+        if m := pattern.fullmatch(text):
+            return reply(m, history)
+    return None
 
 
 def stem(word: str) -> str:

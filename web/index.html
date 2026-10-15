@@ -36,6 +36,12 @@
   .meta { margin-top: 8px; font-size: .78rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; }
   .badge { background: var(--badge); border-radius: 999px; padding: 1px 8px; }
   .error { color: #c0392b; }
+  .thinking { color: var(--muted); font-style: italic; }
+  .thinking span { animation: blink 1.4s infinite both; }
+  .thinking span:nth-child(2) { animation-delay: .2s; }
+  .thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .thinking span { animation: none; } }
   form { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; font: inherit; padding: 10px; border-radius: 10px;
              border: 1px solid var(--line); background: var(--panel); color: var(--text); }
@@ -124,7 +130,7 @@ function greet() {
 
 async function ask(message) {
   add("user", esc(message));
-  const pending = add("bot", "<p>…</p>");
+  const pending = add("bot", '<p class="thinking">thinking<span>.</span><span>.</span><span>.</span></p>');
   send.disabled = true;
   try {
     const res = await fetch("/api/chat", {
@@ -160,7 +166,7 @@ document.getElementById("reset").addEventListener("click", () => {
 
 fetch("/api/info").then(r => r.json()).then(info => {
   document.getElementById("backend").textContent =
-    `${info.backend === "claude" ? "Claude" : "offline mode"} · ${info.chunks} chunks`;
+    `${info.backend === "ollama" ? `Ollama · ${info.model}` : "offline mode"} · ${info.chunks} chunks`;
 }).catch(() => {});
 greet();
 </script>

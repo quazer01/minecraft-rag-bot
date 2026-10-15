@@ -1,44 +1,70 @@
 # CraftGuide: a Minecraft RAG chatbot
 
-CraftGuide answers Minecraft questions from the reference files in `data/`. It uses ChromaDB plus keyword search for retrieval and Claude for answers.
-Without an API key it runs on its own in offline mode: it quotes the best-matching lines from the library, with sources.
+CraftGuide answers Minecraft questions from the reference files in `data/`. It uses ChromaDB plus keyword search for retrieval and a local model served by [Ollama](https://ollama.com) for answers.
+Everything runs on your computer. After setup, CraftGuide needs no internet connection and no account.
+If Ollama is not running, CraftGuide still works in offline mode: it answers simple small talk and quotes the best-matching lines from the library, with sources.
 
-## Setup
+## Set up CraftGuide
 
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env   # optional: put your Anthropic API key in .env for Claude answers
-python ingest.py         # build the vector database
-```
+1. Install Ollama from [ollama.com/download](https://ollama.com/download), then download the default model (about 2 GB):
 
-The first run of `ingest.py` downloads ChromaDB's default embedding model (about 80 MB).
+   ```powershell
+   ollama pull qwen2.5:3b
+   ```
+
+2. Install the Python packages and build the vector database:
+
+   ```powershell
+   python -m venv .venv
+   .venv\Scripts\activate
+   pip install -r requirements.txt
+   python ingest.py
+   ```
+
+The first run of `ingest.py` downloads ChromaDB's default embedding model (about 80 MB). The embedding model and the Ollama model are the only downloads. After that, CraftGuide runs offline.
 
 ## Use
+
+The Ollama app starts its server when you sign in. If `ollama` is installed without the app, run `ollama serve` in a separate terminal first.
 
 ```powershell
 python server.py         # web chat at http://localhost:8000
 python chat.py           # chat in the terminal
-python chat.py --backend offline   # force offline mode even with an API key
+python chat.py --model llama3.2    # use another Ollama model
+python chat.py --backend offline   # use offline mode even when Ollama is running
 python chat.py --debug   # also show each message's route, search query and retrieved sources
-python test_session.py                    # offline checks of routing, history and /reset (fake Claude client)
-python test_questions.py                  # end-to-end questions and conversations (needs the claude backend)
-python test_questions.py --retrieval-only # retrieval checks only, no API key needed
+python test_session.py                    # checks of routing, history, fallback and /reset (fake Ollama, no network)
+python test_questions.py                  # end-to-end questions and conversations against the real model
+python test_questions.py --retrieval-only # retrieval checks only, no Ollama needed
 ```
+
+Both `chat.py` and `server.py` print the active mode when they start, for example `CraftGuide: Ollama · qwen2.5:3b`. In offline mode, the line says why and gives the command that fixes it.
 
 Type `/reset` in the chat to clear the history, or `/quit` to exit.
 
+## Switch models
+
+CraftGuide uses `qwen2.5:3b` by default. To use another model, pull it and pass its name:
+
+```powershell
+ollama pull llama3.2
+python chat.py --model llama3.2
+```
+
+To change the default, set the `OLLAMA_MODEL` environment variable, for example `$env:OLLAMA_MODEL = "llama3.2"` in PowerShell. `--model` overrides `OLLAMA_MODEL`. A small model answers faster on a CPU. A larger model follows the system prompt more closely but needs more memory.
+
 ## Backends
 
-`BACKEND=auto` (the default) uses Claude when `ANTHROPIC_API_KEY` is set and offline mode otherwise. Override it with `--backend` or the `BACKEND` variable.
+`BACKEND=auto` (the default) uses Ollama when it is running at `OLLAMA_URL` and has the model, and offline mode otherwise. Override it with `--backend` or the `BACKEND` variable. With `--backend ollama`, CraftGuide still starts in offline mode when Ollama is not available, and the startup line says why.
 
-| | claude | offline |
+If Ollama stops while CraftGuide is running, CraftGuide answers each message in offline mode until Ollama is back.
+
+| | ollama | offline |
 |---|---|---|
-| Needs | API key | nothing (after the one-time embedding model download) |
-| Casual conversation | answered without retrieval, with the last 20 messages as memory | not supported: every message is searched |
+| Needs | Ollama running, with the model pulled | nothing |
+| Casual conversation | answered without retrieval, with the last 20 messages as memory | scripted replies to greetings, "how are you", thanks, goodbyes, "who are you", "my name is ..." and "what's my name?" |
 | Follow-up questions | rewritten into standalone search queries | searched as typed |
-| Answer | written by Claude from the retrieved chunks | the best-matching lines of the retrieved chunks (`offline.py`) |
+| Answer | written by the model from the retrieved chunks | the best-matching lines of the retrieved chunks (`offline.py`) |
 | Off-topic questions | refused by the system prompt | refused when the question uses words the library doesn't contain |
 
 ## How it works
@@ -50,21 +76,22 @@ Type `/reset` in the chat to clear the history, or `/quit` to exit.
    - `file`: the first file the chunk was found in.
 
    The chunk ID is a hash of the title and text. `data/` contains the same sections several times (the per-topic files, `MINECRAFT_COMPLETE.md`, and `MINECRAFT_COMPLETE.txt`), so the duplicates collapse to one chunk. Rerunning `ingest.py` updates changed chunks and removes chunks whose source text is gone.
-2. `rag.py` sends each message and the chat history to a small Claude model in one call. The model returns JSON with two fields:
+2. `rag.py` sends each message and the chat history to the Ollama model, at temperature 0, with a JSON schema in Ollama's `format` field. The model returns JSON with two fields:
    - `kind`: `minecraft` for Minecraft questions, including follow-ups. `chitchat` for everything else: greetings, small talk, personal facts, and requests unrelated to Minecraft.
    - `search_query`: for `minecraft`, a standalone search query with references resolved from the history.
 3. For `minecraft`, retrieval runs two searches: ChromaDB vector search, and a keyword search (`offline.keyword_search`) that weights rare words more, so exact names such as `creeper` are not missed. Their rankings are merged with reciprocal rank fusion. The top 5 chunks are formatted with their source title, edition, and version. For `chitchat`, retrieval is skipped and the documents are `(no documents: casual conversation)`.
-4. Offline mode has no router. It searches every message, and `offline.py` quotes the retrieved lines that best match the question words.
-5. `server.py` serves the web chat in `web/index.html` using only the Python standard library. The page sends the conversation history with each message, so the server keeps no state, and **New chat** clears it.
-6. The documents and the original message fill `{retrieved_documents}` and `{user_question}` in `prompts/system_prompt.md`. The prompt is otherwise used unchanged. The last 20 messages of the conversation (10 exchanges) are sent as prior messages, so the bot remembers what the user said earlier.
+4. The documents and the original message fill `{retrieved_documents}` and `{user_question}` in `prompts/system_prompt.md`. The prompt is otherwise used unchanged. The model writes the answer from that system prompt, the last 20 messages of the conversation (10 exchanges), and the new message, at temperature 0.3 with an 8192-token context window.
+5. Offline mode has no router. `offline.small_talk` matches the whole message against a table of patterns for greetings, thanks, goodbyes, and introductions. It reads the user's name back from the history. Any other message is searched, and `offline.py` quotes the retrieved lines that best match the question words.
+6. `server.py` serves the web chat in `web/index.html` using only the Python standard library. The page sends the conversation history with each message, so the server keeps no state, and **New chat** clears it.
+
+`rag.py` talks to Ollama's HTTP API with the Python standard library (`urllib`). It sends nothing anywhere except `OLLAMA_URL`.
 
 ## Configuration
 
-Set these in `.env`:
+Set these as environment variables. `--backend` and `--model` override `BACKEND` and `OLLAMA_MODEL`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | none | Enables the Claude backend. |
-| `BACKEND` | `auto` | `auto`, `claude`, or `offline`. |
-| `ANSWER_MODEL` | `claude-opus-5-5` | Writes the answers. |
-| `ROUTER_MODEL` | `claude-haiku-5-5` | Classifies each message and rewrites Minecraft follow-ups into search queries. |
+| `BACKEND` | `auto` | `auto`, `ollama`, or `offline`. |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | The Ollama model that routes messages and writes the answers. |
+| `OLLAMA_URL` | `http://localhost:11434` | Where the Ollama server listens. |

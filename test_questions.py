@@ -1,14 +1,15 @@
 """End-to-end checks: ask CraftGuide real questions and conversations, then check the answers.
 
-    python test_questions.py                  # every check; needs the claude backend
-    python test_questions.py --retrieval-only # retrieval checks only, no API key needed
+    python test_questions.py                  # every check; needs Ollama with the model pulled
+    python test_questions.py --model llama3.2 # the same checks with another Ollama model
+    python test_questions.py --retrieval-only # retrieval checks only, no Ollama needed
 """
 
 import argparse
 import sys
 from dataclasses import dataclass
 
-from rag import ChatSession, Turn, retrieve
+from rag import OLLAMA_MODEL, ChatSession, Turn, open_session, retrieve
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def answer_checks(step: Step, turn: Turn) -> dict[str, bool]:
     if step.retrieval_must_contain:
         checks[f"retrieved {step.retrieval_must_contain!r}"] = retrieval_check(step, turn.chunks)
     if step.cites is not None:
-        checks["cites a source" if step.cites else "no citations"] = ("[Source:" in turn.answer) == step.cites
+        checks["cites a source" if step.cites else "no citations"] = contains(turn.answer, "[Source:") == step.cites
     if step.answer_contains_any:
         checks[f"mentions one of {step.answer_contains_any}"] = any(
             contains(turn.answer, n) for n in step.answer_contains_any)
@@ -68,8 +69,8 @@ def answer_checks(step: Step, turn: Turn) -> dict[str, bool]:
     return checks
 
 
-def run_conversation(steps: list[Step]) -> dict[str, bool]:
-    session, results = ChatSession(), {}
+def run_conversation(base: ChatSession, steps: list[Step]) -> dict[str, bool]:
+    session, results = ChatSession(base.backend, base.ollama), {}
     for step in steps:
         turn = session.ask(step.message)
         print(f"  You: {step.message}\n  [{turn.route.kind}] "
@@ -77,6 +78,17 @@ def run_conversation(steps: list[Step]) -> dict[str, bool]:
               "  CraftGuide: " + turn.answer.replace("\n", "\n    "))
         results |= {f"{step.message!r}: {name}": ok for name, ok in answer_checks(step, turn).items()}
     return results
+
+
+def recording_errors(transport, errors: list[Exception]):
+    """A turn whose Ollama call fails is answered offline, which would quietly grade the wrong backend."""
+    def send(path, payload):
+        try:
+            return transport(path, payload)
+        except Exception as e:
+            errors.append(e)
+            raise
+    return send
 
 
 def run_retrieval_only(steps: list[Step]) -> dict[str, bool]:
@@ -93,21 +105,32 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--retrieval-only", action="store_true")
+    parser.add_argument("--model", default=OLLAMA_MODEL, help="the Ollama model (default: %(default)s)")
     args = parser.parse_args()
 
-    if not args.retrieval_only and ChatSession().backend != "claude":
-        print("These checks need the claude backend: set ANTHROPIC_API_KEY in .env, "
-              "or run with --retrieval-only.")
-        return 2
+    ollama_errors: list[Exception] = []
+    if args.retrieval_only:
+        print("Retrieval checks only (no language model).")
+    else:
+        base, status = open_session("ollama", args.model)
+        print(status)
+        if base.backend != "ollama":
+            print("These checks need the ollama backend; fix the above, or run with --retrieval-only.")
+            return 2
+        base.ollama.transport = recording_errors(base.ollama.transport, ollama_errors)
 
     results: dict[str, bool] = {}
     for name, steps in CONVERSATIONS.items():
         print(f"\n[{name}]")
-        outcome = run_retrieval_only(steps) if args.retrieval_only else run_conversation(steps)
+        outcome = run_retrieval_only(steps) if args.retrieval_only else run_conversation(base, steps)
         for check, ok in outcome.items():
             print(f"  {'PASS' if ok else 'FAIL'}  {check}")
         results |= {f"{name} / {check}": ok for check, ok in outcome.items()}
 
+    if ollama_errors:
+        print(f"\n{len(ollama_errors)} Ollama calls failed, so those turns were answered offline and the "
+              f"results don't measure {args.model}. First error: {ollama_errors[0]!r}")
+        return 2
     failures = [check for check, ok in results.items() if not ok]
     print(f"\n{len(results) - len(failures)} checks passed, {len(failures)} failed")
     for check in failures:

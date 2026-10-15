@@ -1,4 +1,1 @@
 chromadb
-python-dotenv
-# Optional: the Claude backend. Without it (or without an API key) the bot runs offline.
-anthropic
