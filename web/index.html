@@ -24,12 +24,13 @@
   .backend { font-size: .8rem; color: var(--muted); }
   header button { margin-left: auto; }
   #log { flex: 1; overflow-y: auto; padding: 16px 0; display: flex; flex-direction: column; gap: 12px; }
-  .msg { max-width: 92%; padding: 10px 14px; border-radius: 12px; background: var(--panel);
-         border: 1px solid var(--line); overflow-x: auto; }
+  .msg { max-width: 92%; flex-shrink: 0; padding: 10px 14px; border-radius: 12px; background: var(--panel);
+         border: 1px solid var(--line); overflow-wrap: anywhere; }
   .msg.user { align-self: flex-end; background: var(--user); white-space: pre-wrap; }
   .msg.bot p { margin: .3em 0; }
   .msg.bot ul { margin: .3em 0; padding-left: 1.3em; }
-  .msg table { border-collapse: collapse; margin: .4em 0; font-size: .9rem; }
+  .table-wrap { overflow-x: auto; }
+  .msg table { border-collapse: collapse; margin: .4em 0; font-size: .9rem; overflow-wrap: normal; }
   .msg th, .msg td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
   .msg code { background: var(--code); padding: 1px 4px; border-radius: 4px; font-size: .9em; }
   .msg pre { background: var(--code); padding: 8px; border-radius: 6px; overflow-x: auto; }
@@ -79,9 +80,10 @@ function render(md) {
   const lines = md.split("\n"), out = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.startsWith("```")) {
-      const code = [];
-      while (++i < lines.length && !lines[i].startsWith("```")) code.push(lines[i]);
+    if (line.trim().startsWith("```")) {
+      const code = [], indent = line.search(/\S/);
+      while (++i < lines.length && !lines[i].trim().startsWith("```"))
+        code.push(lines[i].slice(Math.min(indent, lines[i].search(/\S|$/))));
       out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
     } else if (line.trim().startsWith("|")) {
       const rows = [];
@@ -91,7 +93,7 @@ function render(md) {
       const sep = rows.length > 1 && /^[|\-:\s]+$/.test(rows[1]);
       const head = sep ? `<tr>${cells(rows[0]).map(c => `<th>${c}</th>`).join("")}</tr>` : "";
       const body = rows.slice(sep ? 2 : 0).map(r => `<tr>${cells(r).map(c => `<td>${c}</td>`).join("")}</tr>`);
-      out.push(`<table>${head}${body.join("")}</table>`);
+      out.push(`<div class="table-wrap"><table>${head}${body.join("")}</table></div>`);
     } else if (/^\s*([-*]|\d+\.)\s/.test(line)) {
       const items = [];
       for (; i < lines.length && /^\s*([-*]|\d+\.)\s/.test(lines[i]); i++)
@@ -145,6 +147,7 @@ async function ask(message) {
   } catch (e) {
     pending.innerHTML = `<p class="error">Something went wrong: ${esc(e.message)}</p>`;
   } finally {
+    log.scrollTop = log.scrollHeight;
     send.disabled = false;
     input.focus();
   }
