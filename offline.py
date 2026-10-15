@@ -19,9 +19,10 @@ STOPWORDS = set("""
 a an and are as at be been but by can could did do does for from get got had has have how i if in into is it its
 me my no not of on or our should so than that the their them then there these they this to too up was we were what
 when where which who why will with would you your about any some all also just much many more most very
-tell know want like please give show find make need hi hello hey thanks thank ok okay yes
+tell know want like please give show find make need hi hello hey thanks thank ok okay yes minecraft
 """.split())
 MAX_LINES = 6
+QUERY_SYNONYMS = {"craft": {"recipe"}, "crafting": {"recipe"}}
 NOT_FOUND = ("I couldn't find that in my Minecraft knowledge base. I'm running offline, so I can only quote "
              "the library: try asking about crafting, mobs, biomes, redstone, enchanting or commands.")
 GREETING = ("Hi! I'm CraftGuide, running offline, so I can't chat, but I can look things up in my Minecraft "
@@ -32,21 +33,19 @@ GREET = r"(?:(?:hi|hello|hey|hiya|yo|good (?:morning|afternoon|evening))(?: ther
 INTRO = r"(?:my name is|my names|call me) (?P<name>[a-z][\w-]*)"
 
 
-def normalize(text: str) -> str:
-    """'Hi, what's my name?' -> 'Hi whats my name': no apostrophes or punctuation, single spaces."""
+def strip_punctuation(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", re.sub(r"['’]", "", text)).split())
 
 
 def remembered_name(history: list[dict[str, str]]) -> str:
     for message in reversed(history):
-        if message["role"] == "user" and (m := re.search(rf"\b{INTRO}", normalize(message["content"]), re.I)):
+        if message["role"] == "user" and (m := re.search(rf"\b{INTRO}", strip_punctuation(message["content"]), re.I)):
             return f"Your name is {m['name']}!"
     return "I don't know your name yet. Tell me with \"my name is ...\"."
 
 
 Reply = Callable[[re.Match, list[dict[str, str]]], str]
 
-# First match wins; each pattern must match the whole message, so "hi, how do I craft a bed?" is a question.
 SMALL_TALK: list[tuple[re.Pattern, Reply]] = [(re.compile(pattern, re.I), reply) for pattern, reply in [
     (rf"{GREET}?(?:how are (?:you|u)|hows it going|how is it going|how you doing)(?: doing)?(?: today)?",
      lambda m, h: "I'm doing great, thanks for asking! Got a Minecraft question for me?"),
@@ -67,7 +66,7 @@ SMALL_TALK: list[tuple[re.Pattern, Reply]] = [(re.compile(pattern, re.I), reply)
 
 
 def small_talk(question: str, history: list[dict[str, str]]) -> str | None:
-    text = normalize(question)
+    text = strip_punctuation(question)
     for pattern, reply in SMALL_TALK:
         if m := pattern.fullmatch(text):
             return reply(m, history)
@@ -101,6 +100,7 @@ def library_idf() -> dict[str, float]:
 def keyword_search(query: str, k: int) -> list[Chunk]:
     """Chunks containing the query's rarest words. Catches exact names ("creeper") that embeddings miss."""
     idf, wanted = library_idf(), terms(query)
+    wanted |= {synonym for t in wanted for synonym in QUERY_SYNONYMS.get(t, ())}
     scored = [(sum(idf[t] for t in wanted & chunk_terms) / (1 + 0.002 * len(chunk.text)), i)
               for i, (chunk, chunk_terms) in enumerate(library())]
     scored = sorted((s for s in scored if s[0] > 0), reverse=True)[:k]

@@ -20,15 +20,13 @@ BED = rag.RetrievedChunk("Crafting > Useful recipes (written)", "both", "26.3",
 
 
 class FakeOllama:
-    """An Ollama transport. The router sends messages that mention 'craft' to minecraft, everything else to chitchat."""
-
     def __init__(self, models=("qwen2.5:3b",)) -> None:
         self.models = models
         self.route_requests: list[dict] = []
         self.answer_requests: list[dict] = []
         self.down = False
 
-    def __call__(self, path: str, payload: dict | None) -> dict:
+    def __call__(self, path: str, payload: dict | None, timeout: float) -> dict:
         if self.down:
             raise URLError("connection refused")
         if path == "/api/tags":
@@ -45,7 +43,7 @@ class FakeOllama:
         return {"model": payload["model"], "message": {"role": "assistant", "content": content}, "done": True}
 
 
-def dead(path: str, payload: dict | None) -> dict:
+def dead(path: str, payload: dict | None, timeout: float) -> dict:
     raise URLError("connection refused")
 
 
@@ -111,7 +109,6 @@ def main() -> int:
     check(rag.parse_route("not json", "q") == rag.Route("minecraft", "q"),
           "a malformed router reply falls back to retrieving the raw question")
 
-    # Choosing the backend at startup.
     backend, status = resolve_backend("auto", Ollama("qwen2.5:3b", transport=dead))
     check(backend == "offline" and "ollama serve" in status and "ollama pull qwen2.5:3b" in status,
           "auto with Ollama down is offline, and the startup line says how to fix it")
@@ -125,7 +122,6 @@ def main() -> int:
     check(resolve_backend("auto", Ollama("qwen2.5:3b", transport=FakeOllama())) == ("ollama", "CraftGuide: Ollama · qwen2.5:3b"),
           "auto with Ollama up and the model pulled is ollama")
 
-    # Ollama stops after startup.
     queries.clear()
     dying = FakeOllama()
     session = ChatSession("ollama", Ollama(transport=dying))
@@ -136,14 +132,13 @@ def main() -> int:
           and queries == ["how do I craft a bed?"], "a question asked after Ollama stops is answered offline")
     check(len(session.history) == 4 and session.history[-1]["content"] == turn.answer,
           "the offline turn joins the history")
-    malformed = ChatSession("ollama", Ollama(transport=lambda path, payload: {"message": {"content": None}}))
+    malformed = ChatSession("ollama", Ollama(transport=lambda path, payload, timeout: {"message": {"content": None}}))
     check(malformed.ask("thanks!").answer == "You're welcome! Happy crafting.",
           "a malformed Ollama reply is answered offline")
 
-    # Offline mode: scripted small talk, otherwise the library.
     queries.clear()
     calls: list[str] = []
-    session = ChatSession("offline", Ollama(transport=lambda path, payload: calls.append(path) or {}))
+    session = ChatSession("offline", Ollama(transport=lambda path, payload, timeout: calls.append(path) or {}))
     say = session.ask
     turn = say("hi, how are you?")
     check(turn.route.kind == "chitchat" and turn.answer and not turn.chunks and not queries,
@@ -166,7 +161,6 @@ def main() -> int:
           "offline, a question that opens with a greeting is still searched")
     check(not calls, "the offline backend never calls Ollama")
 
-    # Small talk is a pure function of the message and the history, so the stateless web server gets it too.
     session = ChatSession("offline", Ollama(transport=dead),
                           history=[{"role": "user", "content": "Hi, my name is Jean!"},
                                    {"role": "assistant", "content": "Nice to meet you."}])

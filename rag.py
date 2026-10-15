@@ -39,7 +39,7 @@ ROUTER_INSTRUCTIONS = """Classify the user's latest message for a Minecraft assi
 conversation such as "what's my name?", requests unrelated to Minecraft).
 For "minecraft", write search_query: a standalone search query for a Minecraft knowledge base, with \
 pronouns and references resolved from the conversation. Use the user's own words and add nothing they \
-didn't say. For "chitchat", search_query is an empty string."""
+didn't say. Never add the word "Minecraft": every document is about Minecraft. For "chitchat", search_query is an empty string."""
 
 ROUTE_SCHEMA = {
     "type": "object",
@@ -137,20 +137,18 @@ def parse_route(text: str, question: str) -> Route:
     return Route("minecraft", query or question)
 
 
-class OllamaUnavailable(Exception):
-    """Ollama could not be reached or sent a reply that isn't the shape we expect."""
+class OllamaError(Exception):
+    pass
 
 
-Transport = Callable[[str, dict | None], dict]  # (path, JSON body or None for a GET) -> JSON reply
+Transport = Callable[[str, dict | None, float], dict]
 
 
 def http_transport(url: str) -> Transport:
-    def send(path: str, payload: dict | None) -> dict:
+    def send(path: str, payload: dict | None, timeout: float) -> dict:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url.rstrip("/") + path, data=data,
                                          headers={"Content-Type": "application/json"})
-        # The only GET is the startup ping, which must fail fast when Ollama isn't running.
-        timeout = PING_TIMEOUT if payload is None else CHAT_TIMEOUT
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     return send
@@ -161,20 +159,20 @@ class Ollama:
         self.model, self.url = model, url
         self.transport = transport or http_transport(url)
 
-    def _call(self, path: str, payload: dict | None) -> dict:
+    def _call(self, path: str, payload: dict | None, timeout: float) -> dict:
         try:
-            reply = self.transport(path, payload)
+            reply = self.transport(path, payload, timeout)
         except (OSError, ValueError, http.client.HTTPException) as e:  # URLError, HTTPError, timeouts, bad JSON
-            raise OllamaUnavailable(f"{type(e).__name__}: {e}") from e
+            raise OllamaError(f"{type(e).__name__}: {e}") from e
         if not isinstance(reply, dict):
-            raise OllamaUnavailable(f"unexpected reply from {path}: {reply!r:.200}")
+            raise OllamaError(f"unexpected reply from {path}: {reply!r:.200}")
         return reply
 
     def models(self) -> list[str]:
-        reply = self._call("/api/tags", None)
+        reply = self._call("/api/tags", None, PING_TIMEOUT)
         models = reply.get("models")
         if not isinstance(models, list):
-            raise OllamaUnavailable(f"unexpected reply from /api/tags: {reply!r:.200}")
+            raise OllamaError(f"unexpected reply from /api/tags: {reply!r:.200}")
         return [m["name"] for m in models if isinstance(m, dict) and isinstance(m.get("name"), str)]
 
     def chat(self, messages: list[dict[str, str]], *, format: dict | None = None, temperature: float) -> str:
@@ -182,16 +180,15 @@ class Ollama:
                    "options": {"temperature": temperature, "num_ctx": NUM_CTX}}
         if format is not None:
             payload["format"] = format
-        reply = self._call("/api/chat", payload)
+        reply = self._call("/api/chat", payload, CHAT_TIMEOUT)
         message = reply.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
-            raise OllamaUnavailable(f"unexpected reply from /api/chat: {reply!r:.200}")
+            raise OllamaError(f"unexpected reply from /api/chat: {reply!r:.200}")
         return content.strip()
 
 
 def resolve_backend(choice: str, ollama: Ollama) -> tuple[Backend, str]:
-    """Pick the backend for this run, plus a startup line naming it (and, when offline, why and the fix)."""
     if choice not in BACKEND_CHOICES:
         raise SystemExit(f"BACKEND must be one of {', '.join(BACKEND_CHOICES)}, not {choice!r}")
     if choice == "offline":
@@ -199,7 +196,7 @@ def resolve_backend(choice: str, ollama: Ollama) -> tuple[Backend, str]:
     model = ollama.model
     try:
         names = ollama.models()
-    except OllamaUnavailable as e:
+    except OllamaError as e:
         return "offline", (f"CraftGuide: offline mode. Ollama isn't reachable at {ollama.url} ({e}). "
                            f"Start it with `ollama serve`, run `ollama pull {model}` once, then restart CraftGuide.")
     if model not in names and f"{model}:latest" not in names:
@@ -242,7 +239,7 @@ class ChatSession:
     def ask(self, question: str) -> Turn:
         try:
             turn = self.ask_ollama(question) if self.backend == "ollama" else self.ask_offline(question)
-        except OllamaUnavailable:  # Ollama stopped after startup: answer this turn offline
+        except OllamaError:
             turn = self.ask_offline(question)
         self.history += [{"role": "user", "content": question}, {"role": "assistant", "content": turn.answer}]
         del self.history[:-HISTORY_LIMIT]
@@ -250,7 +247,6 @@ class ChatSession:
 
 
 def open_session(choice: str = BACKEND, model: str = OLLAMA_MODEL) -> tuple[ChatSession, str]:
-    """A session on the resolved backend, and the startup line to print."""
     ollama = Ollama(model)
     backend, status = resolve_backend(choice, ollama)
     return ChatSession(backend, ollama), status

@@ -38,7 +38,7 @@ CONVERSATIONS: dict[str, list[Step]] = {
     "greeting": [Step("hi, how are you?", retrieves=False, cites=False)],
     "memory": [Step("my name is Jean", retrieves=False),
                Step("what's my name?", retrieves=False, answer_contains_any=("Jean",))],
-    "bed recipe": [Step("how do I craft a bed?", retrieves=True, retrieval_must_contain="3 wool",
+    "bed recipe": [Step("how do I craft a bed?", retrieves=True, retrieval_must_contain="3 wool (top row)",
                         cites=True, answer_contains_any=("wool",))],
     "homework": [Step("solve x^2 = 9", answer_contains_any=("Minecraft",),
                       answer_excludes=("±3", "x = 3", "x=3", "x = -3", "x=-3"))],
@@ -81,10 +81,9 @@ def run_conversation(base: ChatSession, steps: list[Step]) -> dict[str, bool]:
 
 
 def recording_errors(transport, errors: list[Exception]):
-    """A turn whose Ollama call fails is answered offline, which would quietly grade the wrong backend."""
-    def send(path, payload):
+    def send(path, payload, timeout):
         try:
-            return transport(path, payload)
+            return transport(path, payload, timeout)
         except Exception as e:
             errors.append(e)
             raise

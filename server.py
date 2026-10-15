@@ -18,7 +18,7 @@ from rag import BACKEND, BACKEND_CHOICES, HISTORY_LIMIT, OLLAMA_MODEL, ChatSessi
 
 PAGE = ROOT / "web" / "index.html"
 MAX_MESSAGE_CHARS = 2000
-SESSION: ChatSession  # set in main(); its backend and Ollama client are shared by every request
+SESSION: ChatSession
 
 
 def parse_history(raw) -> list[dict[str, str]]:
@@ -66,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
             turn = session.ask(message)
         except (ValueError, TypeError) as e:
             return self._send(400, {"error": f"bad request: {e}"})
-        except Exception as e:  # report it to the page instead of dropping the connection
+        except Exception as e:
             return self._send(502, {"error": f"{type(e).__name__}: {e}"})
         self._send(200, {
             "answer": turn.answer,
