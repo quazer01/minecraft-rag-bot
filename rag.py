@@ -11,6 +11,7 @@ BACKEND=auto (the default) uses Ollama when it is running and has OLLAMA_MODEL, 
 import http.client
 import json
 import os
+import re
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Literal
@@ -32,6 +33,7 @@ CANDIDATES = 15  # per ranking, before fusion
 RRF_K = 60       # the usual reciprocal rank fusion constant
 HISTORY_LIMIT = 20  # messages (10 exchanges); even, so the window always starts with a user message
 NO_DOCUMENTS = "(no documents: casual conversation)"
+DISPUTE = re.compile(r"(?:no[,.!]? )?(?:(?:you|u)(?: are|'re| r)|ur|that'?s|thats|it'?s|its) (?:wrong|not right|incorrect|not true|not correct)[.! ]*|(?:no[,.!]? )?wrong[.!]*", re.I)
 
 ROUTER_INSTRUCTIONS = """Classify the user's latest message for a Minecraft assistant.
 - kind "minecraft": a question about Minecraft, including follow-ups to earlier Minecraft questions.
@@ -220,12 +222,21 @@ class ChatSession:
         return parse_route(reply, question)
 
     def ask_ollama(self, question: str) -> Turn:
-        route = self.route(question)
+        earlier = [m["content"] for m in self.history if m["role"] == "user"]
+        disputed = earlier[-1] if earlier and DISPUTE.fullmatch(question.strip()) else None
+        route = Route("minecraft", disputed) if disputed else self.route(question)
+        if route.kind == "chitchat":
+            history, prompt = self.history, question
+        else:
+            # A 3B model copies its earlier answers, wrong ones included, so Minecraft answers see only the user's turns.
+            history = [m for m in self.history if m["role"] == "user"]
+            prompt = (f"{question}\n(I mean your answer to \"{disputed}\" was wrong. Answer that question again using "
+                      f"only the documents, without repeating your earlier answer.)" if disputed else question)
         chunks = retrieve(route.search_query) if route.kind == "minecraft" else []
         answer = self.ollama.chat([
-            {"role": "system", "content": build_system_prompt(chunks, question)},
-            *self.history,
-            {"role": "user", "content": question},
+            {"role": "system", "content": build_system_prompt(chunks, disputed or question)},
+            *history,
+            {"role": "user", "content": prompt},
         ], temperature=0.3)
         return Turn(question, route, chunks, answer)
 
